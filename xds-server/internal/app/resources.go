@@ -32,8 +32,16 @@ import (
 )
 
 type podEndPoint struct {
-	IP   string
-	Port int32
+	AppName string
+	Version string
+	IP      string
+	Port    int32
+}
+
+type serviceSpec struct {
+	AppName string
+	Name    string
+	Version string
 }
 
 func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
@@ -67,11 +75,12 @@ func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
 						ports = append(ports, port.Port)
 					}
 				}
+
 				logger.Logger.Debug("Endpoint", zap.String("name", name), zap.Any("IP Address", ips), zap.Any("Ports", ports))
 				var podEndPoints []podEndPoint
 				for _, port := range ports {
 					for _, ip := range ips {
-						podEndPoints = append(podEndPoints, podEndPoint{ip, port})
+						podEndPoints = append(podEndPoints, podEndPoint{"", "", ip, port})
 					}
 				}
 				k8sEndPoints[serviceName] = podEndPoints
@@ -81,7 +90,7 @@ func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
 	return k8sEndPoints, nil
 }
 
-func getK8sAppServices(appNames []string) (map[string][]string, error) {
+func getK8sAppServices(appNames []string) (map[string][]serviceSpec, error) {
 
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -98,7 +107,7 @@ func getK8sAppServices(appNames []string) (map[string][]string, error) {
 		logger.Logger.Error("Received error while trying to get Services", zap.Error(err))
 	}
 
-	result := make(map[string][]string)
+	result := make(map[string][]serviceSpec)
 
 	for _, service := range services.Items {
 
@@ -112,10 +121,10 @@ func getK8sAppServices(appNames []string) (map[string][]string, error) {
 		logger.Logger.Debug("K8s", zap.Any("app", appName))
 
 		if result[appName] == nil {
-			result[appName] = []string{}
+			result[appName] = []serviceSpec{}
 		}
 
-		result[appName] = append(result[appName], service.Name)
+		result[appName] = append(result[appName], serviceSpec{appName, service.Name, service.Spec.Selector["version"]})
 
 	}
 
@@ -123,7 +132,7 @@ func getK8sAppServices(appNames []string) (map[string][]string, error) {
 
 }
 
-func getK8sAppEndPoints(appServices map[string][]string) (map[string][]podEndPoint, error) {
+func getK8sAppEndPoints(appServices map[string][]serviceSpec) (map[string][]podEndPoint, error) {
 	k8sEndPoints := make(map[string][]podEndPoint)
 
 	config, err := rest.InClusterConfig()
@@ -142,11 +151,11 @@ func getK8sAppEndPoints(appServices map[string][]string) (map[string][]podEndPoi
 	}
 	logger.Logger.Debug("Endpoint in the cluster", zap.Int("count", len(endPoints.Items)))
 	for appName, services := range appServices {
-		for _, serviceName := range services {
+		for _, serviceSpec := range services {
 
 			for _, endPoint := range endPoints.Items {
 				name := endPoint.GetObjectMeta().GetName()
-				if name == serviceName {
+				if name == serviceSpec.Name {
 					var ips []string
 					var ports []int32
 					for _, subset := range endPoint.Subsets {
@@ -161,7 +170,7 @@ func getK8sAppEndPoints(appServices map[string][]string) (map[string][]podEndPoi
 					var podEndPoints []podEndPoint
 					for _, port := range ports {
 						for _, ip := range ips {
-							podEndPoints = append(podEndPoints, podEndPoint{ip, port})
+							podEndPoints = append(podEndPoints, podEndPoint{serviceSpec.AppName, serviceSpec.Version, ip, port})
 						}
 					}
 
@@ -191,11 +200,23 @@ func clusterLoadAssignment(podEndPoints []podEndPoint, clusterName string, regio
 			},
 		}}
 
+		weight := 1000
+
+		if podEndPoint.AppName == "hello-server" && podEndPoint.Version == "1.0.0" {
+			weight = 300
+		}
+		if podEndPoint.AppName == "hello-server" && podEndPoint.Version == "2.0.0" {
+			weight = 700
+		}
+
 		lbs = append(lbs, &ep.LbEndpoint{
 			HostIdentifier: &ep.LbEndpoint_Endpoint{
 				Endpoint: &ep.Endpoint{
 					Address: hst,
 				}},
+			LoadBalancingWeight: &wrapperspb.UInt32Value{
+				Value: uint32(weight),
+			},
 			HealthStatus: core.HealthStatus_HEALTHY,
 		})
 	}
