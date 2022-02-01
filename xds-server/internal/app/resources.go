@@ -224,6 +224,7 @@ func clusterLoadAssignment(podEndPoints []podEndPoint, clusterName string, regio
 	eds := []types.Resource{
 		&v2.ClusterLoadAssignment{
 			ClusterName: clusterName,
+
 			Endpoints: []*ep.LocalityLbEndpoints{{
 				Locality: &core.Locality{
 					Region: region,
