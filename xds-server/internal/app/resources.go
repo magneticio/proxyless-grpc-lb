@@ -81,6 +81,98 @@ func getK8sEndPoints(serviceNames []string) (map[string][]podEndPoint, error) {
 	return k8sEndPoints, nil
 }
 
+func getK8sAppServices(appNames []string) (map[string][]string, error) {
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
+	}
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	services, err := clientset.CoreV1().Services("").List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		logger.Logger.Error("Received error while trying to get Services", zap.Error(err))
+	}
+
+	result := make(map[string][]string)
+
+	for _, service := range services.Items {
+
+		appName, ok := service.Labels["app"]
+		if !ok {
+			continue
+		}
+
+		if result[appName] == nil {
+			result[appName] = []string{}
+		}
+
+		result[appName] = append(result[appName], service.Name)
+
+	}
+
+	return result, nil
+
+}
+
+func getK8sAppEndPoints(appServices map[string][]string) (map[string][]podEndPoint, error) {
+	k8sEndPoints := make(map[string][]podEndPoint)
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
+	}
+	// creates the clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	endPoints, err := clientset.CoreV1().Endpoints("").List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		logger.Logger.Error("Received error while trying to get EndPoints", zap.Error(err))
+	}
+	logger.Logger.Debug("Endpoint in the cluster", zap.Int("count", len(endPoints.Items)))
+	for appName, services := range appServices {
+		for _, serviceName := range services {
+
+			for _, endPoint := range endPoints.Items {
+				name := endPoint.GetObjectMeta().GetName()
+				if name == serviceName {
+					var ips []string
+					var ports []int32
+					for _, subset := range endPoint.Subsets {
+						for _, address := range subset.Addresses {
+							ips = append(ips, address.IP)
+						}
+						for _, port := range subset.Ports {
+							ports = append(ports, port.Port)
+						}
+					}
+					logger.Logger.Debug("Endpoint", zap.String("name", name), zap.Any("IP Address", ips), zap.Any("Ports", ports))
+					var podEndPoints []podEndPoint
+					for _, port := range ports {
+						for _, ip := range ips {
+							podEndPoints = append(podEndPoints, podEndPoint{ip, port})
+						}
+					}
+
+					if k8sEndPoints[appName] == nil {
+						k8sEndPoints[appName] = podEndPoints
+					} else {
+						k8sEndPoints[appName] = append(k8sEndPoints[appName], podEndPoints...)
+					}
+				}
+			}
+		}
+	}
+	return k8sEndPoints, nil
+}
+
 func clusterLoadAssignment(podEndPoints []podEndPoint, clusterName string, region string, zone string) []types.Resource {
 	var lbs []*ep.LbEndpoint
 	for _, podEndPoint := range podEndPoints {
@@ -227,6 +319,7 @@ func createListener(listenerName string, clusterName string, routeConfigName str
 
 // GenerateSnapshot creates snapshot for each service
 func GenerateSnapshot(services []string) (*cache.Snapshot, error) {
+
 	k8sEndPoints, err := getK8sEndPoints(services)
 	if err != nil {
 		logger.Logger.Error("Error while trying to get EndPoints from k8s cluster", zap.Error(err))
@@ -245,6 +338,45 @@ func GenerateSnapshot(services []string) (*cache.Snapshot, error) {
 		cds = append(cds, createCluster(fmt.Sprintf("%s-cluster", service))...)
 		rds = append(rds, createRoute(fmt.Sprintf("%s-route", service), fmt.Sprintf("%s-vhost", service), fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service))...)
 		lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service), fmt.Sprintf("%s-route", service))...)
+	}
+
+	version := uuid.New()
+	logger.Logger.Debug("Creating Snapshot", zap.String("version", version.String()), zap.Any("EDS", eds), zap.Any("CDS", cds), zap.Any("RDS", rds), zap.Any("LDS", lds))
+	snapshot := cache.NewSnapshot(version.String(), eds, cds, rds, lds, []types.Resource{}, []types.Resource{})
+
+	if err := snapshot.Consistent(); err != nil {
+		logger.Logger.Error("Snapshot inconsistency", zap.Any("snapshot", snapshot), zap.Error(err))
+	}
+	return &snapshot, nil
+}
+
+// GenerateSnapshot creates snapshot for each service
+func GenerateSnapshotFromApps(apps []string) (*cache.Snapshot, error) {
+
+	appServices, err := getK8sAppServices(apps)
+	if err != nil {
+		logger.Logger.Error("Error while trying to get Services from k8s cluster", zap.Error(err))
+		return nil, errors.New("Error while trying to get Services from k8s cluster")
+	}
+
+	k8sEndPoints, err := getK8sAppEndPoints(appServices)
+	if err != nil {
+		logger.Logger.Error("Error while trying to get EndPoints from k8s cluster", zap.Error(err))
+		return nil, errors.New("Error while trying to get EndPoints from k8s cluster")
+	}
+
+	logger.Logger.Debug("K8s", zap.Any("EndPoints", k8sEndPoints))
+
+	var eds []types.Resource
+	var cds []types.Resource
+	var rds []types.Resource
+	var lds []types.Resource
+	for app, podEndPoints := range k8sEndPoints {
+		logger.Logger.Debug("Creating new XDS Entry", zap.String("app", app))
+		eds = append(eds, clusterLoadAssignment(podEndPoints, fmt.Sprintf("%s-cluster", app), "my-region", "my-zone")...)
+		cds = append(cds, createCluster(fmt.Sprintf("%s-cluster", app))...)
+		rds = append(rds, createRoute(fmt.Sprintf("%s-route", app), fmt.Sprintf("%s-vhost", app), fmt.Sprintf("%s-listener", app), fmt.Sprintf("%s-cluster", app))...)
+		lds = append(lds, createListener(fmt.Sprintf("%s-listener", app), fmt.Sprintf("%s-cluster", app), fmt.Sprintf("%s-route", app))...)
 	}
 
 	version := uuid.New()

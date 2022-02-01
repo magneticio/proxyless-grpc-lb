@@ -11,3 +11,6 @@ data:
     upstreamServices: 
       - 'hello-server'
       - 'howdy-server'
+    upstreamApps:
+      - 'hello-server'
+      - 'howdy-server'  

@@ -56,7 +56,8 @@ func main() {
 	nodeID := config.GetString("nodeId")
 	logger.Logger.Info("Creating Node", zap.String("Id", nodeID))
 	for {
-		ss, err := app.GenerateSnapshot(config.GetStringSlice("upstreamServices"))
+		//ss, err := app.GenerateSnapshot(config.GetStringSlice("upstreamServices"))
+		ss, err := app.GenerateSnapshotFromApps(config.GetStringSlice("upstreamApps"))
 		if err != nil {
 			logger.Logger.Error("Error in Generating the SnapShot", zap.Error(err))
 		} else {
