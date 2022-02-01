@@ -102,10 +102,14 @@ func getK8sAppServices(appNames []string) (map[string][]string, error) {
 
 	for _, service := range services.Items {
 
-		appName, ok := service.Labels["app"]
+		logger.Logger.Debug("K8s", zap.Any("service", service.Name))
+
+		appName, ok := service.Spec.Selector["app"]
 		if !ok {
 			continue
 		}
+
+		logger.Logger.Debug("K8s", zap.Any("app", appName))
 
 		if result[appName] == nil {
 			result[appName] = []string{}
@@ -358,6 +362,8 @@ func GenerateSnapshotFromApps(apps []string) (*cache.Snapshot, error) {
 		logger.Logger.Error("Error while trying to get Services from k8s cluster", zap.Error(err))
 		return nil, errors.New("Error while trying to get Services from k8s cluster")
 	}
+
+	logger.Logger.Debug("K8s", zap.Any("Apps", appServices))
 
 	k8sEndPoints, err := getK8sAppEndPoints(appServices)
 	if err != nil {

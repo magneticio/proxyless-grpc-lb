@@ -4,7 +4,8 @@ metadata:
   name: hello-server-1
 spec:
   selector:
-    app: hello-server-1.0.0
+    app: hello-server
+    version: 1.0.0
   ports:
     - protocol: TCP
       port: 50051
@@ -16,7 +17,8 @@ metadata:
   name: hello-server-2
 spec:
   selector:
-    app: hello-server-2.0.0
+    app: hello-server
+    version: 2.0.0
   ports:
     - protocol: TCP
       port: 50051
