@@ -9,8 +9,8 @@ data:
       port: 18000
       maxConcurrentStreams: 1000
     upstreamServices: 
-      - 'hello-server'
-      - 'howdy-server'
+      - 'hello-server-1'
+      - 'hello-server-2'      
     upstreamApps:
       - 'hello-server'
       - 'howdy-server'  

@@ -203,10 +203,10 @@ func clusterLoadAssignment(podEndPoints []podEndPoint, clusterName string, regio
 		weight := 1000
 
 		if podEndPoint.AppName == "hello-server" && podEndPoint.Version == "1.0.0" {
-			weight = 300
+			weight = 1
 		}
 		if podEndPoint.AppName == "hello-server" && podEndPoint.Version == "2.0.0" {
-			weight = 700
+			weight = 1000
 		}
 
 		lbs = append(lbs, &ep.LbEndpoint{
@@ -280,6 +280,53 @@ func createVirtualHost(virtualHostName, listenerName, clusterName string) *v2rou
 
 }
 
+func createVirtualHostForWeightedRoute(virtualHostName string, listenerNames, clusterNames []string) *v2route.VirtualHost {
+	logger.Logger.Debug("Creating RDS", zap.String("host name", virtualHostName))
+
+	clusters := []*v2route.WeightedCluster_ClusterWeight{}
+
+	for _, clusterName := range clusterNames {
+
+		weight := 100
+
+		if clusterName == "hello-server-1-cluster" {
+			weight = 30
+		}
+		if clusterName == "hello-server-2-cluster" {
+			weight = 70
+		}
+
+		clusterWeight := &v2route.WeightedCluster_ClusterWeight{
+			Name:   clusterName,
+			Weight: &wrapperspb.UInt32Value{Value: uint32(weight)},
+		}
+
+		clusters = append(clusters, clusterWeight)
+	}
+
+	vh := &v2route.VirtualHost{
+		Name:    virtualHostName,
+		Domains: listenerNames,
+		Routes: []*v2route.Route{{
+			Match: &v2route.RouteMatch{
+				PathSpecifier: &v2route.RouteMatch_Prefix{
+					Prefix: "",
+				},
+			},
+			Action: &v2route.Route_Route{
+				Route: &v2route.RouteAction{
+					ClusterSpecifier: &v2route.RouteAction_WeightedClusters{
+						WeightedClusters: &v2route.WeightedCluster{
+							Clusters: clusters,
+						},
+					},
+				},
+			},
+		}}}
+	return vh
+
+}
+
 func createRoute(routeConfigName, virtualHostName, listenerName, clusterName string) []types.Resource {
 	vh := createVirtualHost(virtualHostName, listenerName, clusterName)
 	rds := []types.Resource{
@@ -289,6 +336,69 @@ func createRoute(routeConfigName, virtualHostName, listenerName, clusterName str
 		},
 	}
 	return rds
+}
+
+func createWeightedRoute(routeConfigName, virtualHostName string, listenerNames, clusterNames []string) []types.Resource {
+	vh := createVirtualHostForWeightedRoute(virtualHostName, listenerNames, clusterNames)
+	rds := []types.Resource{
+		&v2.RouteConfiguration{
+			Name:         routeConfigName,
+			VirtualHosts: []*v2route.VirtualHost{vh},
+		},
+	}
+	return rds
+}
+
+func createListenerWithoutCluster(listenerName string, routeConfigName string) []types.Resource {
+	logger.Logger.Debug("Creating LISTENER", zap.String("name", listenerName))
+	hcRds := &hcm.HttpConnectionManager_Rds{
+		Rds: &hcm.Rds{
+			RouteConfigName: routeConfigName,
+			ConfigSource: &core.ConfigSource{
+				ConfigSourceSpecifier: &core.ConfigSource_Ads{
+					Ads: &core.AggregatedConfigSource{},
+				},
+			},
+		},
+	}
+
+	manager := &hcm.HttpConnectionManager{
+		CodecType:      hcm.HttpConnectionManager_AUTO,
+		RouteSpecifier: hcRds,
+	}
+
+	pbst, err := ptypes.MarshalAny(manager)
+	if err != nil {
+		panic(err)
+	}
+
+	lds := []types.Resource{
+		&v2.Listener{
+			Name: listenerName,
+			ApiListener: &lv2.ApiListener{
+				ApiListener: pbst,
+			},
+			Address: &core.Address{
+				Address: &core.Address_SocketAddress{
+					SocketAddress: &core.SocketAddress{
+						Protocol: core.SocketAddress_TCP,
+						Address:  "0.0.0.0",
+						PortSpecifier: &core.SocketAddress_PortValue{
+							PortValue: 10000,
+						},
+					},
+				},
+			},
+			FilterChains: []*listenerv2.FilterChain{{
+				Filters: []*listenerv2.Filter{{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &listenerv2.Filter_TypedConfig{
+						TypedConfig: pbst,
+					},
+				}},
+			}},
+		}}
+	return lds
 }
 
 func createListener(listenerName string, clusterName string, routeConfigName string) []types.Resource {
@@ -365,6 +475,61 @@ func GenerateSnapshot(services []string) (*cache.Snapshot, error) {
 		rds = append(rds, createRoute(fmt.Sprintf("%s-route", service), fmt.Sprintf("%s-vhost", service), fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service))...)
 		lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service), fmt.Sprintf("%s-route", service))...)
 	}
+
+	version := uuid.New()
+	logger.Logger.Debug("Creating Snapshot", zap.String("version", version.String()), zap.Any("EDS", eds), zap.Any("CDS", cds), zap.Any("RDS", rds), zap.Any("LDS", lds))
+	snapshot := cache.NewSnapshot(version.String(), eds, cds, rds, lds, []types.Resource{}, []types.Resource{})
+
+	if err := snapshot.Consistent(); err != nil {
+		logger.Logger.Error("Snapshot inconsistency", zap.Any("snapshot", snapshot), zap.Error(err))
+	}
+	return &snapshot, nil
+}
+
+func GenerateSnapshotWithWeightedRoute(services []string) (*cache.Snapshot, error) {
+
+	k8sEndPoints, err := getK8sEndPoints(services)
+	if err != nil {
+		logger.Logger.Error("Error while trying to get EndPoints from k8s cluster", zap.Error(err))
+		return nil, errors.New("Error while trying to get EndPoints from k8s cluster")
+	}
+
+	logger.Logger.Debug("K8s", zap.Any("EndPoints", k8sEndPoints))
+
+	var eds []types.Resource
+	var cds []types.Resource
+	var rds []types.Resource
+	var lds []types.Resource
+
+	//clusters := []string{}
+
+	for service, podEndPoints := range k8sEndPoints {
+		logger.Logger.Debug("Creating new XDS Entry", zap.String("service", service))
+
+		// clusters = append(clusters, fmt.Sprintf("%s-cluster", service))
+
+		eds = append(eds, clusterLoadAssignment(podEndPoints, fmt.Sprintf("%s-cluster", service), "my-region", "my-zone")...)
+		cds = append(cds, createCluster(fmt.Sprintf("%s-cluster", service))...)
+
+		if service != "hello-server-1" && service != "hello-server-2" {
+
+			rds = append(rds, createRoute(fmt.Sprintf("%s-route", service), fmt.Sprintf("%s-vhost", service), fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service))...)
+			lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service), fmt.Sprintf("%s-route", service))...)
+		}
+
+		// if service == "hello-server-1" || service == "hello-server-2" {
+
+		// 	lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service), fmt.Sprintf("%s-route", "hello-server"))...)
+
+		// } else {
+
+		// 	lds = append(lds, createListener(fmt.Sprintf("%s-listener", service), fmt.Sprintf("%s-cluster", service), fmt.Sprintf("%s-route", service))...)
+
+		// }
+	}
+
+	rds = append(rds, createWeightedRoute(fmt.Sprintf("%s-route", "hello-server"), fmt.Sprintf("%s-vhost", "hello-server"), []string{"hello-server-listener"}, []string{"hello-server-1-cluster", "hello-server-2-cluster"})...)
+	lds = append(lds, createListenerWithoutCluster(fmt.Sprintf("%s-listener", "hello-server"), fmt.Sprintf("%s-route", "hello-server"))...)
 
 	version := uuid.New()
 	logger.Logger.Debug("Creating Snapshot", zap.String("version", version.String()), zap.Any("EDS", eds), zap.Any("CDS", cds), zap.Any("RDS", rds), zap.Any("LDS", lds))
